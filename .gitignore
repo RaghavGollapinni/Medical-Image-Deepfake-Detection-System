@@ -1,0 +1,18 @@
+# Data and Outputs
+data/
+checkpoints/
+outputs/
+wandb/
+
+# Logs and Caches
+*.log
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.pytest_cache/
+.DS_Store
+
+# Temporary Files
+*.pt
+*.pth
+*.json
