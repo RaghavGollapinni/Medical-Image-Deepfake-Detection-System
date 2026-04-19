@@ -53,14 +53,16 @@ class FocalLoss(nn.Module):
         return focal_loss.mean()
 
 class MultiTaskLoss(nn.Module):
-    def __init__(self, alpha=1.0, beta=0.5, gamma=0.3, pos_weight=None):
+    def __init__(self, alpha=1.0, beta=2.0, gamma=0.3, pos_weight=None, forgery_pos_weight=10.0):
         super(MultiTaskLoss, self).__init__()
         self.alpha = alpha
         self.beta = beta
         self.gamma = gamma
         
         self.bce_disease = FocalLoss(alpha=0.25, gamma=2.0, pos_weight=pos_weight)
-        self.bce_forgery = nn.BCEWithLogitsLoss()
+        # forgery_pos_weight handles the ~5:1 authentic:fake imbalance
+        f_pw = torch.tensor([forgery_pos_weight])
+        self.bce_forgery = nn.BCEWithLogitsLoss(pos_weight=f_pw)
         self.bce_localization = nn.BCEWithLogitsLoss()
         self.dice_localization = DiceLoss()
         

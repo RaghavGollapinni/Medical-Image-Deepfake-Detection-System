@@ -9,8 +9,10 @@ from .metrics import (
     calculate_trust_calibration_error,
     compute_classification_metrics,
     compute_forgery_metrics as precision_forgery_metrics,
-    plot_forgery_confusion_matrix
+    plot_forgery_confusion_matrix,
+    find_optimal_thresholds
 )
+from sklearn.metrics import f1_score
 
 class Evaluator:
     def __init__(self, model, config, device):
@@ -18,10 +20,53 @@ class Evaluator:
         self.config = config
         self.device = device
         self.ts_calculator = None
+        self.disease_thresholds = 0.5
+        self.forgery_threshold = 0.5
         
         from ..inference.trust_score import TrustScoreCalculator
         self.ts_calculator = TrustScoreCalculator(config)
         
+    @torch.no_grad()
+    def calibrate_thresholds(self, val_loader):
+        print("Calibrating disease thresholds on validation set...")
+        self.model.eval()
+        all_d_preds, all_d_targets = [], []
+        all_f_preds, all_f_targets = [], []
+        for batch in tqdm(val_loader, desc="Calibration"):
+            images = batch['image'].to(self.device)
+            targets = batch['disease'].cpu().numpy()
+            f_targets = batch['forgery'].cpu().numpy()
+            preds = self.model(images)
+            d_preds = torch.sigmoid(preds['disease_logits']).cpu().numpy()
+            f_preds = torch.sigmoid(preds['forgery_logits']).squeeze(-1).cpu().numpy()
+            all_d_preds.append(d_preds)
+            all_d_targets.append(targets)
+            all_f_preds.append(f_preds)
+            all_f_targets.append(f_targets)
+
+        d_preds = np.concatenate(all_d_preds, axis=0)
+        d_targets = np.concatenate(all_d_targets, axis=0)
+        self.disease_thresholds = find_optimal_thresholds(d_targets, d_preds)
+        rounded_th = [round(t, 2) for t in self.disease_thresholds]
+        print(f"Optimal disease thresholds computed: {rounded_th}")
+
+        # Calibrate forgery threshold
+        f_preds = np.concatenate(all_f_preds, axis=0)
+        f_targets = np.concatenate(all_f_targets, axis=0)
+        self.forgery_threshold = self._find_optimal_forgery_threshold(f_preds, f_targets)
+        print(f"Optimal forgery threshold computed: {self.forgery_threshold:.4f}")
+
+    def _find_optimal_forgery_threshold(self, y_pred: np.ndarray, y_true: np.ndarray) -> float:
+        """Find optimal threshold for forgery detection using F1 score."""
+        best_t, best_f1 = 0.5, -1.0
+        for t in np.arange(0.05, 0.95, 0.01):
+            y_bin = (y_pred >= t).astype(int)
+            score = f1_score(y_true, y_bin, zero_division=0)
+            if score > best_f1:
+                best_f1 = score
+                best_t = t
+        return best_t
+
     @torch.no_grad()
     def evaluate(self, dataloader, scenario_name="Standard"):
         self.model.eval()
@@ -64,8 +109,8 @@ class Evaluator:
         # 1. Disease Metrics
         disease_results = calculate_disease_metrics(d_preds, d_targets)
         
-        # 2. Forgery Metrics
-        forgery_results = calculate_forgery_metrics(f_preds, f_targets)
+        # 2. Forgery Metrics (using calibrated threshold)
+        forgery_results = calculate_forgery_metrics(f_preds, f_targets, threshold=self.forgery_threshold)
         
         # 3. Localization Metrics
         iou = calculate_localization_iou(l_preds, l_targets, threshold=self.config.get('evaluation', {}).get('iou_threshold', 0.5))
@@ -85,13 +130,13 @@ class Evaluator:
         trust_alignment = np.mean(predicted_reliable == true_reliability)
         
         # 5. Advanced Metrics (Precision, Recall, F1)
-        disease_results_ext = compute_classification_metrics(d_targets, d_preds)
-        forgery_results_ext = precision_forgery_metrics(f_targets, f_preds)
+        disease_results_ext = compute_classification_metrics(d_targets, d_preds, threshold=self.disease_thresholds)
+        forgery_results_ext = precision_forgery_metrics(f_targets, f_preds, threshold=self.forgery_threshold)
         
         reports_dir = self.config.get('paths', {}).get('reports', 'outputs/reports/')
         import os
         os.makedirs(reports_dir, exist_ok=True)
-        plot_forgery_confusion_matrix(f_targets, f_preds, save_path=os.path.join(reports_dir, "confusion_matrix.png"))
+        plot_forgery_confusion_matrix(f_targets, f_preds, save_path=os.path.join(reports_dir, "confusion_matrix.png"), threshold=self.forgery_threshold)
         
         metrics = {
             "disease_auc": disease_results["mean_auc"],

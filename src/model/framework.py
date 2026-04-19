@@ -70,10 +70,17 @@ class MedicalDeepfakeDetector(nn.Module):
         
         # 2. Disease Classification (using spatial features)
         disease_logits = self.disease_head(pooled_features)
-        
+
         # 3. FFT Branch (Frequency)
         fft_features = self.fft_branch(x_fft)
-        
+
+        # Debug: Verify FFT branch is producing non-zero features
+        if self.training and torch.rand(1).item() < 0.01:  # 1% of batches
+            fft_mean = fft_features.mean().item()
+            fft_std = fft_features.std().item()
+            fft_max = fft_features.max().item()
+            print(f"[FFT Debug] mean={fft_mean:.6f}, std={fft_std:.6f}, max={fft_max:.6f}")
+
         # 4. Forgery Detection (Fusion of spatial and frequency)
         fused_features = torch.cat([pooled_features, fft_features], dim=1)
         forgery_logits = self.forgery_head(fused_features)

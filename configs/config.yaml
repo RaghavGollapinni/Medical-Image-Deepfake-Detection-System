@@ -144,23 +144,23 @@ training:
 
   # Phase 1: Warm-up (freeze backbone, train heads only)
   phase1:
-    epochs:           5
+    epochs:           3
     learning_rate:    1.0e-3
     freeze_backbone:  true
 
   # Phase 2: Joint fine-tuning (unfreeze all)
   phase2:
-    epochs:           20
+    epochs:           32
     learning_rate:    1.0e-4
     freeze_backbone:  false
 
   # Phase 3: Stabilization (low LR, fine-tune entire system)
   phase3:
-    epochs:           10
+    epochs:           15
     learning_rate:    1.0e-5
     freeze_backbone:  false
 
-  total_epochs:       35            # 5 + 20 + 10
+  total_epochs:       50            # 3 + 32 + 15
   early_stopping_patience: 5        # Stop if no improvement in 5 epochs
 
   scheduler:
@@ -185,9 +185,10 @@ training:
 
   # Multi-task loss weights
   loss_weights:
-    alpha:            1.0           # Disease classification (BCE)
-    beta:             0.5           # Forgery detection (BCE)
+    alpha:            1.0           # Disease classification (Focal Loss)
+    beta:             2.0           # Forgery detection (increase to counter class imbalance)
     gamma:            0.3           # Localization (Dice + BCE)
+    forgery_pos_weight: 10.0        # Weight for manipulated class (authentic:fake ~5:1)
 
   # Mixed precision
   mixed_precision:    true          # torch.cuda.amp FP16
@@ -201,7 +202,7 @@ training:
     wandb:            true
     wandb_project:    "medical-deepfake-detector"
     log_every_n_steps: 50
-    save_best_by:     "forgery_auc" # Metric to select best checkpoint
+    save_best_by:     "disease_auc" # Metric to select best checkpoint
 
 
 # ─── TRUST SCORE ─────────────────────────────────────────────

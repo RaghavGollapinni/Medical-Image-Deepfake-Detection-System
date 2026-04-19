@@ -53,11 +53,13 @@ class Trainer:
         # Loss
         weights = config['training']['loss_weights']
         pos_weights = compute_pos_weights(config["paths"]["train_csv"]).to(device)
+        forgery_pw = weights.get('forgery_pos_weight', 10.0)
         self.criterion = MultiTaskLoss(
             alpha=weights.get('alpha', 1.0),
-            beta=weights.get('beta', 0.5),
+            beta=weights.get('beta', 2.0),
             gamma=weights.get('gamma', 0.3),
-            pos_weight=pos_weights
+            pos_weight=pos_weights,
+            forgery_pos_weight=forgery_pw
         ).to(device)
         
         # We will configure optimizer learning rates per phase dynamically
@@ -67,7 +69,7 @@ class Trainer:
         # Logging config (required for scheduler & best metric)
         self.log_cfg = config.get("training", {}).get("logging", {})
         self.save_best_by = self.log_cfg.get("save_best_by", "forgery_auc")
-        self.best_metric = -float('inf') if self.save_best_by == "forgery_auc" else float('inf')
+        self.best_metric = -float('inf') if "auc" in self.save_best_by else float('inf')
         self.save_dir = config['paths'].get('checkpoints', 'checkpoints/')
         os.makedirs(self.save_dir, exist_ok=True)
         
@@ -81,7 +83,7 @@ class Trainer:
         sched_cfg = config.get('training', {}).get('scheduler', {})
         self.scheduler = ReduceLROnPlateau(
             self.optimizer,
-            mode="max" if self.save_best_by == "forgery_auc" else "min",
+            mode="max" if "auc" in self.save_best_by else "min",
             factor=sched_cfg.get('factor', 0.5),
             patience=sched_cfg.get('patience', 3),
             min_lr=float(sched_cfg.get('min_lr', 1e-7))
@@ -94,12 +96,9 @@ class Trainer:
         self.scaler = torch.amp.GradScaler('cuda') if use_mixed_precision else None
         self.use_autocast = use_mixed_precision
         
-        # Early Stopping
-        es_cfg = config.get('training', {}).get('early_stopping', {})
-        self.early_stopping = EarlyStopping(
-            patience=es_cfg.get('patience', 7),
-            min_delta=es_cfg.get('min_delta', 0.001)
-        )
+        # Early Stopping (Decoupled)
+        self.es_disease = EarlyStopping(patience=10, min_delta=0.001)
+        self.es_forgery = EarlyStopping(patience=5, min_delta=0.001)
         
         # Logging backends
         self.writer = None
@@ -145,6 +144,7 @@ class Trainer:
             phase = 'phase2'
         else:
             phase = 'phase3'
+        self.current_phase = phase
             
         # Update backbone frozen status
         freeze_backbone = c_train[phase]['freeze_backbone']
@@ -183,6 +183,26 @@ class Trainer:
                 'localization_masks': batch['mask'].to(self.device)
             }
             
+            # Difficulty Curriculum (Fix 5)
+            intensities = batch['metadata']['manipulation_intensity'].to(self.device)
+            if self.current_phase == 'phase1':
+                # Obvious fakes: > 0.10, or Authentic (relaxed from 0.20)
+                valid_mask = (intensities > 0.10) | (targets['forgery_labels'] == 0)
+            elif self.current_phase == 'phase2':
+                # Medium fakes: > 0.05, or Authentic (relaxed from 0.10)
+                valid_mask = (intensities > 0.05) | (targets['forgery_labels'] == 0)
+            else:
+                # Phase 3: all fakes
+                valid_mask = torch.ones_like(targets['forgery_labels'], dtype=torch.bool)
+                
+            if not valid_mask.any():
+                continue
+                
+            images = images[valid_mask]
+            targets['disease_labels'] = targets['disease_labels'][valid_mask]
+            targets['forgery_labels'] = targets['forgery_labels'][valid_mask]
+            targets['localization_masks'] = targets['localization_masks'][valid_mask]
+            
             self.optimizer.zero_grad()
             
             if self.scaler:
@@ -192,6 +212,8 @@ class Trainer:
                     loss = loss_dict['total_loss']
                 
                 self.scaler.scale(loss).backward()
+                self.scaler.unscale_(self.optimizer)
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.scaler.step(self.optimizer)
                 self.scaler.update()
             else:
@@ -200,6 +222,7 @@ class Trainer:
                 loss = loss_dict['total_loss']
                 
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
                 self.optimizer.step()
                 
             steps += 1
@@ -224,6 +247,8 @@ class Trainer:
         steps = 0
         all_forgery_probs = []
         all_forgery_targets = []
+        all_disease_probs = []
+        all_disease_targets = []
         
         pbar = tqdm(self.val_loader, desc="Validation")
         for batch_idx, batch in enumerate(pbar):
@@ -255,12 +280,16 @@ class Trainer:
             targets_np = targets['forgery_labels'].detach().cpu().numpy()
             all_forgery_probs.append(probs)
             all_forgery_targets.append(targets_np)
+            
+            d_probs = torch.sigmoid(preds['disease_logits']).detach().cpu().numpy()
+            d_targets_np = targets['disease_labels'].detach().cpu().numpy()
+            all_disease_probs.append(d_probs)
+            all_disease_targets.append(d_targets_np)
 
         if steps == 0:
             raise RuntimeError("No validation batches were processed.")
         metrics = {k: v / steps for k, v in metrics_sum.items()}
 
-        # Compute forgery AUC for checkpoint selection.
         try:
             y_prob = np.concatenate(all_forgery_probs, axis=0)
             y_true = np.concatenate(all_forgery_targets, axis=0)
@@ -270,6 +299,13 @@ class Trainer:
                 metrics["forgery_auc"] = float("nan")
         except Exception:
             metrics["forgery_auc"] = float("nan")
+            
+        try:
+            d_prob = np.concatenate(all_disease_probs, axis=0)
+            d_true = np.concatenate(all_disease_targets, axis=0)
+            metrics["disease_auc"] = float(roc_auc_score(d_true, d_prob, average="macro"))
+        except Exception:
+            metrics["disease_auc"] = float("nan")
 
         return metrics
 
@@ -335,8 +371,13 @@ class Trainer:
                 torch.save(self.model.state_dict(), save_path)
                 print(f"Saved new best model to {save_path}")
 
-            if self.early_stopping.step(metric):
-                print("[Trainer] Early stopping triggered.")
+            d_auc = float(val_metrics.get('disease_auc', 0.0))
+            f_auc = float(val_metrics.get('forgery_auc', 0.0))
+            stop_d = self.es_disease.step(d_auc)
+            stop_f = self.es_forgery.step(f_auc)
+            
+            if stop_d and stop_f:
+                print("[Trainer] Both Early Stoppings triggered. Halting.")
                 break
 
             history.append({

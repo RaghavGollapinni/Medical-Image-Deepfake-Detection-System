@@ -54,7 +54,9 @@ def main():
     model = MedicalDeepfakeDetector(cfg).to(device)
 
     ckpt_dir = cfg["paths"].get("checkpoints", "checkpoints")
-    ckpt_path = os.path.join(ckpt_dir, "best_forgery_auc.pt")
+    ckpt_path = os.path.join(ckpt_dir, "best_disease_auc.pt")
+    if not os.path.exists(ckpt_path):
+        ckpt_path = os.path.join(ckpt_dir, "best_forgery_auc.pt")
     if not os.path.exists(ckpt_path):
         ckpt_path = os.path.join(ckpt_dir, "best_model.pt")
 
@@ -65,11 +67,16 @@ def main():
     else:
         print("  [WARN] No checkpoint found - evaluating untrained model")
 
-    # Build test DataLoader
-    _, _, test_loader = build_dataloaders(cfg)
+    # Build DataLoaders
+    _, val_loader, test_loader = build_dataloaders(cfg)
 
     # Run S3 evaluation (mixed sets)
     evaluator = Evaluator(model, cfg, device)
+    
+    # Threshold Calibration on unseen Val set
+    if val_loader is not None:
+        evaluator.calibrate_thresholds(val_loader)
+        
     results = evaluator.evaluate(test_loader, scenario_name="S3_mixed")
 
     # Save results

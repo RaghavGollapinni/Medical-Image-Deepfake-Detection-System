@@ -32,7 +32,7 @@ def calculate_disease_metrics(preds, targets):
         "class_aucs": aucs
     }
 
-def calculate_forgery_metrics(preds, targets):
+def calculate_forgery_metrics(preds, targets, threshold=0.5):
     """
     preds: (N,) probabilities
     targets: (N,) binary labels (1=manipulated, 0=authentic)
@@ -41,8 +41,7 @@ def calculate_forgery_metrics(preds, targets):
         auc = roc_auc_score(targets, preds)
     else:
         auc = np.nan
-    # Threshold at 0.5
-    preds_bin = (preds >= 0.5).astype(int)
+    preds_bin = (preds >= threshold).astype(int)
     acc = accuracy_score(targets, preds_bin)
     
     return {
@@ -87,8 +86,27 @@ def calculate_trust_calibration_error(trust_scores, true_reliability, n_bins=10)
             
     return ece
 
-def compute_classification_metrics(y_true: np.ndarray, y_pred: np.ndarray, threshold: float = 0.5, class_names: list = DISEASE_CLASSES) -> dict:
-    y_bin = (y_pred >= threshold).astype(int)
+def find_optimal_thresholds(y_true: np.ndarray, y_pred: np.ndarray) -> list:
+    thresholds = []
+    for i in range(y_true.shape[1]):
+        best_t = 0.5
+        best_f1 = -1.0
+        for t in np.arange(0.1, 0.95, 0.05):
+            y_bin = (y_pred[:, i] >= t).astype(int)
+            score = f1_score(y_true[:, i], y_bin, zero_division=0)
+            if score > best_f1:
+                best_f1 = score
+                best_t = t
+        thresholds.append(best_t)
+    return thresholds
+
+def compute_classification_metrics(y_true: np.ndarray, y_pred: np.ndarray, threshold=0.5, class_names: list = DISEASE_CLASSES) -> dict:
+    if isinstance(threshold, list):
+        y_bin = np.zeros_like(y_pred)
+        for i in range(y_pred.shape[1]):
+            y_bin[:, i] = (y_pred[:, i] >= threshold[i]).astype(int)
+    else:
+        y_bin = (y_pred >= threshold).astype(int)
     results = {}
     for i, cls in enumerate(class_names):
         try:

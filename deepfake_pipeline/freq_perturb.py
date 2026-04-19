@@ -168,8 +168,8 @@ def run_perturbation_pipeline(
     seed: int = 42,
     modes: Tuple[str, ...] = VALID_MODES,
     subtle_fraction: float = 0.4,
-    subtle_range: Tuple[float, float] = (0.05, 0.30),
-    normal_range: Tuple[float, float] = (0.30, 0.85),
+    subtle_range: Tuple[float, float] = (0.05, 0.20),
+    normal_range: Tuple[float, float] = (0.20, 0.40),
 ) -> None:
     """
     Batch perturbation runner compatible with existing split/manifest schema.
