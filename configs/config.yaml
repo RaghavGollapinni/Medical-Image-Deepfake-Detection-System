@@ -38,7 +38,7 @@ paths:
   test_csv:           "data/splits/test.csv"
 
   # ── Outputs ────────────────────────────────────────────────
-  checkpoints:        "checkpoints/"
+  checkpoints:        "/content/drive/MyDrive/MedicalDeepfakeDetect/checkpoints/"
   outputs:            "outputs/"
   logs:               "outputs/logs/"
   heatmaps:           "outputs/heatmaps/"
